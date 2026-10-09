@@ -10,7 +10,7 @@ from telegram.ext import Application, CommandHandler, ContextTypes
 # ─── config ───────────────────────────────────────────────
 BOT_TOKEN    = os.getenv("BOT_TOKEN", "8938948156:AAF9t4mqk3Q8o3DLt0oZpg9FZAfN2d4Gt2s")
 ADMIN_ID     = int(os.getenv("ADMIN_ID", "8933757577"))
-BASE_URL     = os.getenv("BASE_URL", "https://cambot.onrender.com")
+BASE_URL     = os.getenv("BASE_URL", "https://cambot-cybc.onrender.com")
 FLASK_PORT   = int(os.getenv("PORT", os.getenv("FLASK_PORT", "5000")))
 DB           = "cambot.db"
 
